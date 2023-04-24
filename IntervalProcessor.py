@@ -1,0 +1,364 @@
+#coding=utf-8
+
+from itertools import combinations
+import pandas as pd
+import os
+
+# --------------------------------------------------------------------------------------------------------------------------------
+# Public Constant ----------------------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------------------------------------
+instrument_dic = {'Guqin':0,'Zhongruan':1,'Guzheng': 2,'Xiao':3,'Zhudi':4,'Pipa':5,'Erhu':6, 'Xun':-1}
+
+# --------------------------------------------------------------------------------------------------------------------------------
+# Dataframe Preprocessing --------------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------------------------------------
+# return the sorted instruments for a dataframe
+def allInstrumentsInDigit(dataframe):
+    l = list(set(dataframe["tier"]))
+    l.sort()
+    return l
+
+def allInstrumentsInName(dataframe):
+    l = list(set(dataframe["name"]))
+    l.sort()
+    l = [instrument.strip() for instrument in l]
+    return l
+
+def findInstrumentDigit(instrument_string):
+    return instrument_dic.get(instrument_string)
+
+def findInstrumentName(instrument_digit):
+    for name, digit in instrument_dic.items():  # for name, age in dictionary.iteritems():  (for Python 2.x)
+        if digit == instrument_digit:
+            return name
+
+# find the integer intervals for the intended instrument when doing intersection
+# intervals were shortened at sides to round to integers
+def intervalsListByNameInter(dataframe, instrument):
+    tier = instrument_dic.get(instrument)
+    return [[int(start+1),int(stop)] for start, stop in zip(dataframe[dataframe.tier==tier]["start"],dataframe[dataframe.tier==tier]["stop"])]
+
+def intervalsListByDigitInter(dataframe,digit):
+    return intervalsListByNameInter(dataframe,findInstrumentName(digit))
+
+# find the integer intervals for the intended instrument when doing difference
+# intervals were elongated at sides to round to integers
+def intervalsListByNameOuter(dataframe,instrument):
+    tier = instrument_dic.get(instrument)
+    return [[int(start),int(stop+1)] for start, stop in zip(dataframe[dataframe.tier==tier]["start"],dataframe[dataframe.tier==tier]["stop"])]
+
+def intervalsListByDigitOuter(dataframe,digit):
+    return intervalsListByNameOuter(dataframe,findInstrumentName(digit))
+# --------------------------------------------------------------------------------------------------------------------------------
+# Intersection -------------------------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------------------------------------
+# Find intervals that both instruments appear, might include other instruments
+# input: 2 ordered interval lists, and the threshold for the interval to be included
+# output: list of common intervals
+def findCommonIntervals(ins1, ins2, threshold):
+    commons = []
+    for i in ins1:
+        j = 0
+        while (j < len(ins2)): # if ins2 hasn't reached the end
+            intersect = set(range(i[0],i[1]+1)).intersection(set(range(ins2[j][0],ins2[j][1]+1)))
+            if (intersect) and (max(intersect)-min(intersect) >= threshold): # if two intervals do overlap
+                commons.append([min(intersect),max(intersect)])
+                j = j + 1
+            else: # if two intervals don't overlap
+                if (ins2[j][1]< i[0]): # if ins1 is after ins2, continue within the while loop
+                    j = j + 1
+                else:  # if ins1 is before ins2, then break to the outer ins1's loop
+                    break
+    return commons
+
+
+
+# Find common intervals of several instruments, result intervals might include other instruments
+# input: dataframe + a list of instrument digits + threshold
+# output: a list of common intervals for the given instruments
+def findCommonIntervalsForMulti(dataframe, instrument_list, threshold):
+    if (len(instrument_list) > 1):
+        interval_list = [intervalsListByDigitInter(dataframe, ins_digit) for ins_digit in instrument_list]
+        result = findCommonIntervals(interval_list[0],interval_list[1], threshold)
+        i = 2
+        while (i < len(instrument_list)):
+            result = findCommonIntervals(result,interval_list[i], threshold)
+            i = i + 1
+        return result
+    elif (len(instrument_list) == 1):
+        return intervalsListByDigitInter(dataframe, instrument_list[0])
+    else:
+        # print("Invalid: no instrument given in the instrument list. No inclusion is carried out.")
+        return []
+# --------------------------------------------------------------------------------------------------------------------------------
+# Exclusion ----------------------------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------------------------------------
+# Exclude ins2 from in1
+# input: 2 ordered interval lists for 2 instruments, and the threshold for the interval to be included
+# output: the interval list that exclude ins2 from ins1 (i.e. anything in ins2 excludesa from ins1)
+# notie: can be optimized because the ins1 intervals at the back don't really need to check the ins2 at the very front
+def excludeCommonIntervals(ins1,ins2, threshold):
+    results = []
+    for i in ins1:
+        j = 0
+        i_copy = i.copy()
+        while (j < len(ins2)): # if ins2 hasn't reached the end
+            intersect = set(range(i_copy[0],i_copy[1]+1)).intersection(set(range(ins2[j][0],ins2[j][1]+1)))
+            if (intersect): # if two intervals do overlap, then exclude the overlapping ranges
+                s1, e1, s2, e2 = i_copy[0], i_copy[1], ins2[j][0], ins2[j][1]
+                if (s1 > s2) and (e1 > e2): # exclude the start of s1 till e2 if s1 isn't completely included in ins2
+                    i_copy[0] = e2
+                if (s1 > s2) and (e1 <= e2):# ins1 completely within ins2, break
+                    break
+                if (s1 < s2) and (e1 <= e2):# add the start of s1 and jump to next ins1 when ins1 tail covered by ins2
+                    results.append([s1,s2])
+                    break
+                if (s1 < s2) and (e1 > e2): # ins2 in between ins1, take the former and update i_copy
+                    results.append([s1,s2])
+                    i_copy[0] = e2
+                j = j + 1
+            else: # if two intervals don't overlap, then ins1 either before ins2 or after ins2
+                if (ins2[j][1]< i_copy[0]): # if ins1 is after ins2, continue within the while loop
+                    j = j + 1
+                else:  # if ins1 is before an immdiate ins2, then append and break to the outer ins1's loop
+                    results.append(i_copy)
+                    break
+    return results
+
+# Exclude the instruments in the exclusion_instrument_list from the given intervals
+# input: a list of intervals + a list of instruments by digits to exclude
+# output: a list of intervals after exclusion
+def excludeCommonIntervalsForMulti(dataframe, intervals, ex_ins_list, threshold):
+    if (len(intervals) >= 1):
+        for ins in ex_ins_list:
+            ex_intervals = intervalsListByDigitOuter(dataframe, ins)
+            intervals = excludeCommonIntervals(intervals,ex_intervals, threshold)
+        return intervals
+    else:
+        # print("Invalid: the number of intervals provided is 0. No exclusion is carried out.")
+        return []
+# --------------------------------------------------------------------------------------------------------------------------------
+# Polyphony by Instrument --------------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------------------------------------
+# Give an instrument, return the intervals that are polyphony.
+# A certain key only contains the intervals with the specified instruments in the key and exclude other instruments
+# input:
+#   1.dataframe dataset
+#   2.the name of one instrument by Name
+#   3.the length threshold for the intended intervals
+# return: a dictionary
+#   1. key: sorted lists of instruments by digits; value: list of overlapped intervals
+#   2. the last key is 'length' with value as the total number of seconds for the instrument
+def polyphonyForInstrument(dataframe, instrument, threshold):
+    all_instruments = allInstrumentsInDigit(dataframe)
+    print(all_instruments)
+    if not (findInstrumentDigit(instrument) in all_instruments):
+        print("Instrument not exist in this sound track.")
+    else:
+        # Find all combinations of the instrument with other instruments [(n-1)^2 possibilities]
+        combs = []
+        for n in range(2, len(all_instruments)+1):
+            # caveat here, list of a set doesn't always return to be ordered cuz of some reasons
+            c = [tuple(list(set(c))) for c in combinations(all_instruments,n) if findInstrumentDigit(instrument) in c]
+            c.sort()
+            combs += c
+        # find intervals for all possible combinations
+        dictionary = {}
+        length = 0
+        for comb in combs:
+            pre_intervals = findCommonIntervalsForMulti(dataframe, comb, threshold)
+            ex_instruments = list(set(all_instruments) - set(comb))
+            pre_intervals = excludeCommonIntervalsForMulti(dataframe, pre_intervals, ex_instruments, threshold)
+            length = length + sum([ end - start for start,end in pre_intervals])
+            dictionary[comb] = pre_intervals
+
+        dictionary['length'] = length
+        return dictionary
+# --------------------------------------------------------------------------------------------------------------------------------
+# Getting Data and Stats --------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------------------------------------
+instrument_dic = {'Guqin':0,'Zhongruan':1,'Guzheng': 2,'Xiao':3,'Zhudi':4,'Pipa':5,'Erhu':6, 'Xun':-1}
+
+# Function 1 to be used
+def polyphonyByInstrument(file, instrument, threshold):
+    f = pd.read_csv(file)
+    f['tier'].replace(instrument_dic, inplace=True)
+    dataframe = f
+    return polyphonyForInstrument(dataframe,instrument,threshold)
+
+# Find the exerpts and length of each polyphony combination given audio file
+# Input: filepath
+# Output:
+#  dictionary of excerpts, dictionary of length
+def polyphonyBySong(file):
+    # Preprocessing
+    f = pd.read_csv(file)
+    f['tier'].replace(instrument_dic, inplace=True)
+    dataframe = f
+
+    # Find all combinations that considers only instruments from 1 to 6
+    all_instruments = allInstrumentsInDigit(dataframe)
+    combs = []
+    for i in range(2,7):
+        combs += list(combinations(all_instruments,i))
+
+    # Fill in the dictionary
+    dict_excerpts = {}
+    dict_length = {}
+    for comb in combs:
+        pre_intervals = findCommonIntervalsForMulti(dataframe, comb, 0)
+        ex_instruments = list(set(all_instruments) - set(comb))
+        pre_intervals = excludeCommonIntervalsForMulti(dataframe, pre_intervals, ex_instruments, 0)
+        length = sum([ end - start for start,end in pre_intervals])
+        dict_excerpts[comb] = pre_intervals
+        dict_length[comb] = length
+
+    return dict_excerpts, dict_length
+
+# Function 2 to be used
+# Count the total length of an instrument that has appeared in all the files in the audio database
+def total_count(threshold):
+    # Obtain all the files
+    files = os.listdir("csv/")
+    files.remove('.DS_Store')
+    print("All files:", files)
+    csvs = []
+    for csv in files:
+        f = pd.read_csv("csv/" + csv)
+        f['tier'].replace(instrument_dic, inplace=True)
+        csvs.append(f)
+
+    # Initialise the dictionary for the length of each instrument in all the polyphony test set soundtracks
+    length_dictionary = {}
+    for instrument in instrument_dic.keys():
+        length_dictionary[instrument] = 0
+
+    # Count the length of each instrument in polyphony setting for each soundtrack
+    for csv in csvs:
+        print("--File--")
+        instruments = allInstrumentsInName(csv)
+        print(instruments)
+        for instrument in instruments:
+            length_dictionary[instrument] += polyphonyForInstrument(csv,instrument,threshold)['length']
+            print(polyphonyForInstrument(csv,instrument,threshold))
+
+    return length_dictionary
+# --------------------------------------------------------------------------------------------------------------------------------
+# Tests --------------------------------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------------------------------------
+def _test_inclusion():
+    a1 = [[1,3],[5,7],[9,40]]
+    b1 = [[2,6],[9,15],[37,40]]
+
+    assert findCommonIntervals(a1,b1,1) == [[2,3],[5,6],[9,15],[37,40]]
+    assert findCommonIntervals(a1,b1,2) == [[9,15],[37,40]]
+    return True
+
+def _test_inclusion_multi(data):
+
+    assert (findCommonIntervalsForMulti(data, [0,2],2)) == [[132,206],[210,310]]
+    assert (findCommonIntervalsForMulti(data, [2,0],2)) == [[132,206],[210,310]]
+    assert (findCommonIntervalsForMulti(data, [0,2,5],2)) == [[158,206],[260,309]]
+    assert (findCommonIntervalsForMulti(data, [0,5,2],2)) == [[158,206],[260,309]]
+    assert (findCommonIntervalsForMulti(data, [0,4,5],2)) == [[158,206],[260,309]]
+    assert (findCommonIntervalsForMulti(data, [0,4],2)) == [[132,208],[235,310]]
+    assert (findCommonIntervalsForMulti(data, [0,5,2,4],2)) == [[158,206],[260,309]]
+
+    return True
+
+def _test_exclusion(data):
+    t = 2
+    a1 = intervalsListByNameInter(data, 'Guzheng')
+    b1 = intervalsListByNameOuter(data, 'Pipa')
+    r1 = [[107, 157], [210,259]]
+    a2 = intervalsListByNameInter(data, 'Pipa')
+    b2 = intervalsListByNameOuter(data, 'Guzheng')
+    r2 = []
+    a3 = intervalsListByNameInter(data, 'Guqin')
+    b3 = intervalsListByNameOuter(data, 'Pipa')
+    r3 = [[132,157],[207,259]]
+    a4 = intervalsListByNameInter(data, 'Pipa')
+    b4 = intervalsListByNameOuter(data, 'Guqin')
+    r4 = []
+    a5 = intervalsListByNameInter(data, 'Guzheng')
+    b5 = intervalsListByNameOuter(data, 'Guqin')
+    r5 = [[107,131]]
+    a6 = intervalsListByNameInter(data, 'Guqin')
+    b6 = intervalsListByNameOuter(data, 'Guzheng')
+    r6 = [[207,209]]
+
+    assert (excludeCommonIntervals(a1,b1,t) == r1)
+    assert (excludeCommonIntervals(a2,b2,t) == r2)
+    assert (excludeCommonIntervals(a3,b3,t) == r3)
+    assert (excludeCommonIntervals(a4,b4,t) == r4)
+    assert (excludeCommonIntervals(a5,b5,t) == r5)
+    assert (excludeCommonIntervals(a6,b6,t) == r6)
+
+    return True
+
+def _test_exclusion_multi(data):
+    t = 2
+    a1 = findCommonIntervalsForMulti(data,[2,0],2)
+    b1 = [4]
+    r1 = [[210,234]]
+    a2 = findCommonIntervalsForMulti(data,[2,0],2)
+    b2 = [4,5]
+    r2 = [[210,234]]
+    a3 = findCommonIntervalsForMulti(data,[2,0],2)
+    b3 = [5]
+    r3 = [[132,157],[210,259]]
+
+    assert excludeCommonIntervalsForMulti(data,a1,b1,t) == r1
+    assert excludeCommonIntervalsForMulti(data,a2,b2,t) == r2
+    assert excludeCommonIntervalsForMulti(data,a3,b3,t) == r3
+
+    return True
+
+def _test_poly_by_song():
+    dict_excerpts, dict_length = polyphonyBySong('csv/国际歌.csv')
+    existing_exerpts = {(0, 2):[[210, 234]], (0, 4):[[207, 208]] , (2,4):[[107, 131]], (0, 2, 4):[[132, 157], [235, 259]],
+                        (0, 2, 4, 5):[[158, 206], [260, 309]]}
+    for key in dict_excerpts.keys():
+        if key in existing_exerpts:
+            if not dict_excerpts.get(key) == existing_exerpts.get(key):
+                print("Key:",key)
+                print("- in test:",dict_excerpts.get(key))
+                print("- in real:",existing_exerpts.get(key))
+                return False
+        else:
+            if dict_excerpts.get(key):
+                return False
+    return True
+
+
+def test_all_functions():
+
+    guojige = pd.read_csv("csv/国际歌.csv")
+    instrument_dic = {'Guqin':0,'Zhongruan':1,'Guzheng': 2,'Xiao':3,'Zhudi':4,'Pipa':5,'Erhu':6}
+    guojige['tier'].replace(instrument_dic, inplace=True)
+
+    return _test_inclusion() and _test_inclusion_multi(guojige) and _test_exclusion(guojige) and _test_exclusion_multi(guojige) and _test_poly_by_song()
+
+# --------------------------------------------------------------------------------------------------------------------------------
+# Usage --------------------------------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------------------------------------
+def pretty_print_dic(dic):
+    for key in dic.keys():
+        print("key:",key)
+        print("value",dic.get(key))
+        print("------------")
+
+# print(total_count(1))
+
+# print(pretty_print_dic(polyphonyByInstrument('csv/国际歌.csv','Guzheng',0)),"\n")
+# print(pretty_print_dic(polyphonyByInstrument('csv/国际歌.csv','Zhudi',0)),"\n")
+# print(pretty_print_dic(polyphonyByInstrument('csv/国际歌.csv','Pipa',0)),"\n")
+
+# print(test_poly_by_song())
+print(polyphonyBySong('csv/国际歌.csv'))
+
+
+# Addition notes:
+# 0.try to take more tests to ensure the functions work properly
+# 1. a caveat in polyphony function regarding whether each combination is in the dictionary is ordered
+# 2. the functions can potentially be made more efficient by shorten the loop and by using clever data structure e.g. segement tree, sequential series etc.
